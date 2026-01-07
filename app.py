@@ -102,14 +102,23 @@ with st.sidebar:
     st.header("🔍 查詢設定")
     acc = st.text_input("管理員帳號", value="jjk888")
     
-    # 手機端建議使用簡易日期選擇
     today = datetime.now()
-    st_date = st.date_input("開始日期 (固定 01 號)", today.replace(day=1))
-    ed_date = st.date_input("結束日期", today)
     
-    st_time = f"{st_date} 08:00:00"
-    ed_time = f"{ed_date} 07:59:59"
+    # --- 開始日期與時間 ---
+    st.subheader("📅 開始時間")
+    st_date = st.date_input("選擇日期", today.replace(day=1), key="sd")
+    st_hour = st.selectbox("小時", range(24), index=8, key="sh") # 預設 08 點
     
+    # --- 結束日期與時間 ---
+    st.subheader("📅 結束時間")
+    ed_date = st.date_input("選擇日期", today, key="ed")
+    ed_hour = st.selectbox("小時", range(24), index=7, key="eh") # 預設 07 點
+    
+    # 組合出精確的格式
+    st_time = f"{st_date} {st_hour:02d}:00:00"
+    ed_time = f"{ed_date} {ed_hour:02d}:59:59"
+    
+    st.divider() # 分隔線
     run_btn = st.button("🚀 生成對帳報表", use_container_width=True)
 
 # 執行與呈現
