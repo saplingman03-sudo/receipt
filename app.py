@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 設定
 SUPER_PASSWORD = "ccycs"
 
-# --- 1. 資料抓取與計算邏輯 (保留你原本的精華) ---
+# --- 1. 資料抓取與計算邏輯 ---
 def run_crawler_logic(st_dt, ed_dt, admin_acc):
     CONFIG = {
         "banknote": {
@@ -20,11 +20,7 @@ def run_crawler_logic(st_dt, ed_dt, admin_acc):
         }
     }
 
-    dt_end = datetime.strptime(ed_dt, "%Y-%m-%d %H:%M:%S")
-    is_new_month_start = True if (dt_end.day == 1 and dt_end.hour >= 8) else False
-    dt_offset_end = (dt_end - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-
-    # 抓取店家
+    # 抓取店家資料
     brand_headers = {"Authorization": CONFIG["brand"]["token"]}
     brand_res = requests.get(CONFIG["brand"]["url"], headers=brand_headers, params={"page_size": 1000})
     brand_raw_list = brand_res.json().get('data', {}).get('data', [])
@@ -44,32 +40,41 @@ def run_crawler_logic(st_dt, ed_dt, admin_acc):
             '代理名稱': a_name
         })
 
-    # 抓取流水
+    # 抓取流水 (改為動態全抓，確保數據準確)
     banknote_headers = {"Authorization": CONFIG["banknote"]["token"]}
+    # 先抓第一頁獲取總頁數
     init_res = requests.get(CONFIG["banknote"]["url"], headers=banknote_headers, params={"pagesize": 100})
     total_pages = init_res.json()['data']['list']['last_page']
     
     all_raw_banknote = []
     def fetch_worker(page):
-        r = requests.get(CONFIG["banknote"]["url"], headers=banknote_headers, params={"pagenum": page, "pagesize": 500})
-        return r.json().get('data', {}).get('list', {}).get('data', [])
+        try:
+            r = requests.get(CONFIG["banknote"]["url"], headers=banknote_headers, params={"pagenum": page, "pagesize": 500}, timeout=10)
+            return r.json().get('data', {}).get('list', {}).get('data', [])
+        except:
+            return []
 
+    # 使用執行緒池全速抓取所有頁面
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(fetch_worker, p) for p in range(1, min(total_pages + 1, 50))] # 限制頁數加快速度
+        futures = [executor.submit(fetch_worker, p) for p in range(1, total_pages + 1)]
         for f in as_completed(futures):
             all_raw_banknote.extend(f.result())
+
+    if not all_raw_banknote:
+        raise Exception("未能從 API 獲取任何數據")
 
     full_df = pd.DataFrame(all_raw_banknote).drop_duplicates(subset=['id'])
     full_df['amount'] = pd.to_numeric(full_df['amount'], errors='coerce').fillna(0)
     full_df['店家'] = full_df['brand'].apply(lambda x: x.get('name', "未知"))
 
+    # 根據老闆選擇的時間區間進行過濾
     df_range_a = full_df[(full_df['created_at'].astype(str) >= st_dt) & (full_df['created_at'].astype(str) <= ed_dt)]
 
     report_rows = []
     for brand, group in df_range_a.groupby('店家'):
-        v_in = group[group['currency_type'] == 1]['amount'].sum()
-        v_open = group[group['currency_type'] == 2]['amount'].sum()
-        v_wash = group[group['currency_type'] == 3]['amount'].sum()
+        v_in = group[group['currency_type'] == 1]['amount'].sum()    # 投鈔
+        v_open = group[group['currency_type'] == 2]['amount'].sum()  # 開分
+        v_wash = group[group['currency_type'] == 3]['amount'].sum()  # 洗分
         accumulated = int(v_open - v_wash + v_in)
         report_rows.append({
             '店家': brand, '開分': int(v_open), '投鈔': int(v_in), '洗分': int(v_wash),
@@ -78,43 +83,48 @@ def run_crawler_logic(st_dt, ed_dt, admin_acc):
     
     df_report = pd.DataFrame(report_rows)
     df_brand_map = pd.DataFrame(brand_mapping)
-    df_report = pd.merge(df_report, df_brand_map[['name', '管理員帳號', '台數']], left_on='店家', right_on='name', how='left').drop(columns=['name'])
+    if not df_report.empty:
+        df_report = pd.merge(df_report, df_brand_map[['name', '管理員帳號', '台數']], left_on='店家', right_on='name', how='left').drop(columns=['name'])
 
     # 權限過濾
     if admin_acc.strip() != SUPER_PASSWORD:
         df_report = df_report[df_report['管理員帳號'] == admin_acc.strip()]
 
-    # 總計
-    summary = {
-        '店家': '總計', '開分': df_report['開分'].sum(), '投鈔': df_report['投鈔'].sum(),
-        '洗分': df_report['洗分'].sum(), '月初至今日累計營業額': df_report['月初至今日累計營業額'].sum(),
-        '代理名稱': '', '管理員帳號': '', '台數': 0
-    }
-    return pd.concat([df_report, pd.DataFrame([summary])], ignore_index=True)
+    # 總計計算
+    if not df_report.empty:
+        summary = {
+            '店家': '總計', '開分': df_report['開分'].sum(), '投鈔': df_report['投鈔'].sum(),
+            '洗分': df_report['洗分'].sum(), '月初至今日累計營業額': df_report['月初至今日累計營業額'].sum(),
+            '代理名稱': '---', '管理員帳號': '---', '台數': df_report['台數'].sum()
+        }
+        return pd.concat([df_report, pd.DataFrame([summary])], ignore_index=True)
+    else:
+        return pd.DataFrame()
 
 # --- 2. Streamlit 網頁介面 ---
 st.set_page_config(page_title="王牌財務分析系統", layout="wide")
 
-st.title("📱 王牌財務分析工具 V3.0 (iPhone 專用)")
+st.title("📱 王牌財務分析工具 V3.1")
 
 # 側邊欄控制
 with st.sidebar:
     st.header("🔍 查詢設定")
     acc = st.text_input("管理員帳號", value="jjk888")
     
-    # 手機端建議使用簡易日期選擇
     today = datetime.now()
-    st_date = st.date_input("開始日期 (固定 01 號)", today.replace(day=1))
+    st_date = st.date_input("開始日期", today.replace(day=1))
     ed_date = st.date_input("結束日期", today)
     
+    # 標準營業時間區間 (08:00 到隔日 07:59)
     st_time = f"{st_date} 08:00:00"
     ed_time = f"{ed_date} 07:59:59"
     
     run_btn = st.button("🚀 生成對帳報表", use_container_width=True)
 
-# 執行與呈現
+# 儲存查詢時間到 session 中，以便顯示
 if run_btn:
-    with st.spinner("📡 正在從 API 抓取數據..."):
+    st.session_state.current_range = f"{st_time} 至 {ed_time}"
+    with st.spinner("📡 正在抓取全量數據（包含所有頁面）..."):
         try:
             df_final = run_crawler_logic(st_time, ed_time, acc)
             st.session_state.df = df_final
@@ -125,22 +135,41 @@ if run_btn:
 if 'df' in st.session_state:
     df = st.session_state.df
     
-    # 期待值計算與顯示
+    # 顯示統計區間 (解決老闆不知道時間的問題)
+    st.info(f"📊 **目前統計區間**：{st.session_state.get('current_range', '未定義')}")
+
+    # 期待值計算與大型數字看板
     total_row = df[df['店家'] == '總計']
     if not total_row.empty:
         v_profit = total_row['月初至今日累計營業額'].values[0]
         v_in = total_row['開分'].values[0] + total_row['投鈔'].values[0]
         expect_val = (v_profit / v_in * 100) if v_in != 0 else 0
-        st.metric("🎯 當前總體期待值", f"{expect_val:.2f}%", delta=f"{v_profit:,.0f} (累計)")
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("🎯 總體期待值", f"{expect_val:.2f}%")
+        c2.metric("💰 總累計營業額", f"{v_profit:,.0f}")
+        c3.metric("📥 總開分+投鈔", f"{v_in:,.0f}")
 
     # 分頁顯示
-    tab1, tab2, tab3, tab4 = st.tabs(["📝 營業明細", "📊 數據分析", "📈 趨勢圖", "⚙️ 設定"])
+    tab1, tab2 = st.tabs(["📝 營業明細", "⚙️ 詳細設定"])
 
     with tab1:
-        # 排除顯示欄位
-        display_df = df.drop(columns=['管理員帳號', '台數'], errors='ignore')
-        # 老闆手機可以排序、縮放、長按複製
-        st.dataframe(display_df.style.format(thousands=","), use_container_width=True, height=500)
+        if not df.empty:
+            display_df = df.drop(columns=['管理員帳號', '台數'], errors='ignore')
+            # 針對手機優化：表格寬度 100%，並設定適當高度
+            st.dataframe(
+                display_df.style.format({
+                    '開分': "{:,.0f}", '投鈔': "{:,.0f}", '洗分': "{:,.0f}", 
+                    '月初至今日累計營業額': "{:,.0f}"
+                }), 
+                use_container_width=True, 
+                height=600
+            )
+        else:
+            st.warning("此區間內無任何數據，請檢查日期設定。")
 
     with tab2:
-        st.info("💡 未來這裡會放圓餅圖看各店佔比")
+        st.write("目前登入帳號:", acc)
+        if st.button("清除快取"):
+            st.session_state.clear()
+            st.rerun()
