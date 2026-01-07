@@ -150,9 +150,9 @@ if run_btn:
 # 結果顯示區
 if 'df' in st.session_state:
     if 'df' in st.session_state and 'time_range' in st.session_state:
-    st.info(f"📋 目前對帳區間：{st.session_state.time_range}")
-    df = st.session_state.df
-    
+        st.info(f"📋 目前對帳區間：{st.session_state.time_range}")
+        df = st.session_state.df
+     
     # 期待值計算指標
     total_row = df[df['店家'] == '總計']
     if not total_row.empty:
